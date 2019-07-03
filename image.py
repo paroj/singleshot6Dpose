@@ -2,8 +2,10 @@
 # encoding: utf-8
 import random
 import os
-from PIL import Image, ImageChops, ImageMath
+from PIL import Image
 import numpy as np
+
+import cv2
 
 def scale_image_channel(im, c, v):
     cs = list(im.split())
@@ -12,23 +14,13 @@ def scale_image_channel(im, c, v):
     return out
 
 def distort_image(im, hue, sat, val):
-    im = im.convert('HSV')
-    cs = list(im.split())
-    cs[1] = cs[1].point(lambda i: i * sat)
-    cs[2] = cs[2].point(lambda i: i * val)
-    
-    def change_hue(x):
-        x += hue*255
-        if x > 255:
-            x -= 255
-        if x < 0:
-            x += 255
-        return x
-    cs[0] = cs[0].point(change_hue)
-    im = Image.merge(im.mode, tuple(cs))
+    im = cv2.cvtColor(im, cv2.COLOR_RGB2HSV_FULL)
 
-    im = im.convert('RGB')
-    return im
+    im[:, :, 0] = ((im[:, :, 0] + hue * 255) % 255).astype(np.uint8)
+    im[:, :, 1] = np.clip(im[:, :, 1] * sat, 0, 255).astype(np.uint8)
+    im[:, :, 2] = np.clip(im[:, :, 2] * val, 0, 255).astype(np.uint8)
+
+    return cv2.cvtColor(im, cv2.COLOR_HSV2RGB_FULL)
 
 def rand_scale(s):
     scale = random.uniform(1, s)
@@ -44,8 +36,8 @@ def random_distort_image(im, hue, saturation, exposure):
     return res
 
 def data_augmentation(img, shape, jitter, hue, saturation, exposure):
-
-    ow, oh = img.size
+    oh = img.shape[0]
+    ow = img.shape[1]
     
     dw =int(ow*jitter)
     dh =int(oh*jitter)
@@ -62,13 +54,16 @@ def data_augmentation(img, shape, jitter, hue, saturation, exposure):
     sy = float(sheight) / oh
     
     flip = random.randint(1,10000)%2
-    cropped = img.crop( (pleft, ptop, pleft + swidth - 1, ptop + sheight - 1))
+    pad = cv2.copyMakeBorder(img, dh, dh, dw, dw, cv2.BORDER_CONSTANT)
+    cropped = pad[dh+ptop:dh+ptop + sheight - 1,dw+pleft:dw+pleft + swidth - 1,:]
 
     dx = (float(pleft)/ow)/sx
     dy = (float(ptop) /oh)/sy
 
-    sized = cropped.resize(shape)
+    sized = cv2.resize(np.array(cropped), shape, interpolation=cv2.INTER_LINEAR)
 
+    if flip: 
+        sized = cv2.flip(sized, 1)
     img = random_distort_image(sized, hue, saturation, exposure)
     
     return img, flip, dx,dy,sx,sy 
@@ -149,36 +144,22 @@ def fill_truth_detection(labpath, w, h, flip, dx, dy, sx, sy):
     return label
 
 def change_background(img, mask, bg):
-    # oh = img.height  
-    # ow = img.width
-    ow, oh = img.size
-    bg = bg.resize((ow, oh)).convert('RGB')
-    
-    imcs = list(img.split())
-    bgcs = list(bg.split())
-    maskcs = list(mask.split())
-    fics = list(Image.new(img.mode, img.size).split())
-    
-    for c in range(len(imcs)):
-        negmask = maskcs[c].point(lambda i: 1 - i / 255)
-        posmask = maskcs[c].point(lambda i: i / 255)
-        fics[c] = ImageMath.eval("a * c + b * d", a=imcs[c], b=bgcs[c], c=posmask, d=negmask).convert('L')
-    out = Image.merge(img.mode, tuple(fics))
-
-    return out
+    return cv2.copyTo(img, mask, cv2.resize(bg, (img.shape[1], img.shape[0])))
 
 def load_data_detection(imgpath, shape, jitter, hue, saturation, exposure, bgpath):
     labpath = imgpath.replace('images', 'labels').replace('JPEGImages', 'labels').replace('.jpg', '.txt').replace('.png','.txt')
     maskpath = imgpath.replace('JPEGImages', 'mask').replace('/00', '/').replace('.jpg', '.png')
 
     ## data augmentation
-    img = Image.open(imgpath).convert('RGB')
-    mask = Image.open(maskpath).convert('RGB')
-    bg = Image.open(bgpath).convert('RGB')
-    
+    img = cv2.imread(imgpath)
+    mask = cv2.imread(maskpath)
+    bg = cv2.imread(bgpath)
+
     img = change_background(img, mask, bg)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
     img,flip,dx,dy,sx,sy = data_augmentation(img, shape, jitter, hue, saturation, exposure)
-    ow, oh = img.size
+    ow, oh = img.shape[1], img.shape[0]
     label = fill_truth_detection(labpath, ow, oh, flip, dx, dy, 1./sx, 1./sy)
     return img,label
 
